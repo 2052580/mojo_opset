@@ -84,6 +84,11 @@ def apply_mojo_to_qwen3(
 from contextlib import contextmanager
 @contextmanager
 def rewrite_assertion(module_name):
+    from mojo_opset.utils.misc import get_bool_env
+    disable = get_bool_env("MOJO_DISABLE_ASSERTION_REWRITE", False)
+    if disable:
+        return
+
     from .misc import get_bool_env
     from _pytest.stash import Stash
     from _pytest.assertion import install_importhook
