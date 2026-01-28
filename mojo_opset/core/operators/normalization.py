@@ -3,6 +3,16 @@ import torch.nn.functional as F
 
 from ..operator import MojoOperator
 
+def layernrom_initialize_weigth(self, hidden_size, **kwargs):
+    for k, v in kwargs.items():
+        if v is None:
+            v = torch.nn.Parameter(
+                torch.empty(hidden_size, **self.tensor_factory_kwargs)
+            )
+        else:
+            assert v.size(0) == hidden_size
+        setattr(self, k, v)
+
 
 class MojoLayerNorm(MojoOperator):
 
@@ -29,16 +39,7 @@ class MojoLayerNorm(MojoOperator):
               will lead to errors when applying LayerNorm.
         """
         super().__init__(**kwargs)
-        self.weight = (
-            torch.nn.Parameter(torch.empty(hidden_size, **self.tensor_factory_kwargs))
-            if weight is None
-            else weight
-        )
-        self.bias = (
-            torch.nn.Parameter(torch.empty(hidden_size, **self.tensor_factory_kwargs))
-            if weight is None
-            else bias
-        )
+        layernrom_initialize_weigth(self, hidden_size, weight=weight, bias=bias)
         self.variance_epsilon = eps
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
@@ -85,11 +86,7 @@ class MojoRMSNorm(MojoOperator):
               will lead to errors when applying RMSNorm.
         """
         super().__init__(**kwargs)
-        self.weight = (
-            torch.nn.Parameter(torch.empty(hidden_size, **self.tensor_factory_kwargs))
-            if weight is None
-            else weight
-        )
+        layernrom_initialize_weigth(self, hidden_size, weight=weight)
         self.variance_epsilon = eps
 
     def forward(self, hidden_state: torch.Tensor) -> torch.Tensor:
@@ -146,11 +143,8 @@ class MojoResidualAddRMSNorm(MojoOperator):
             raise ValueError("norm_pos should be 'pre' or 'post'")
 
         self.variance_epsilon = float(eps)
-        self.weight = (
-            torch.nn.Parameter(torch.empty(hidden_size, **self.tensor_factory_kwargs))
-            if weight is None
-            else weight
-        )
+        layernrom_initialize_weigth(self, hidden_size, weight=weight)
+
         self.norm_pos = norm_pos
 
     def forward(self, hidden_state: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
@@ -207,16 +201,7 @@ class MojoResidualAddLayerNorm(MojoOperator):
             raise ValueError("norm_pos should be 'pre' or 'post'")
 
         self.variance_epsilon = float(eps)
-        self.weight = (
-            torch.nn.Parameter(torch.empty(hidden_size, **self.tensor_factory_kwargs))
-            if weight is None
-            else weight
-        )
-        self.bias = (
-            torch.nn.Parameter(torch.empty(hidden_size, **self.tensor_factory_kwargs))
-            if bias is None
-            else bias
-        )
+        layernrom_initialize_weigth(self, hidden_size, weight=weight, bias=bias)
         self.norm_pos = norm_pos
         self.affine = self.weight is not None and self.bias is not None
 
