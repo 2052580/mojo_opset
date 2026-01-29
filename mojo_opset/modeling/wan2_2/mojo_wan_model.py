@@ -16,6 +16,7 @@ from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoLayerNorm
 from mojo_opset import MojoRoPE
 from mojo_opset import MojoGelu
+from mojo_opset import MojoSilu
 from mojo_opset import MojoStorePagedKVCache
 
 __all__ = ['WanModel']
@@ -74,38 +75,6 @@ def rope_apply(x, grid_sizes, freqs):
     return torch.stack(output).float()
 
 
-class WanRMSNorm(nn.Module):
-
-    def __init__(self, dim, eps=1e-5):
-        super().__init__()
-        self.dim = dim
-        self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim))
-
-    def forward(self, x):
-        r"""
-        Args:
-            x(Tensor): Shape [B, L, C]
-        """
-        return self._norm(x.float()).type_as(x) * self.weight
-
-    def _norm(self, x):
-        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-
-
-class WanLayerNorm(nn.LayerNorm):
-
-    def __init__(self, dim, eps=1e-6, elementwise_affine=False):
-        super().__init__(dim, elementwise_affine=elementwise_affine, eps=eps)
-
-    def forward(self, x):
-        r"""
-        Args:
-            x(Tensor): Shape [B, L, C]
-        """
-        return super().forward(x.float()).type_as(x)
-
-
 class WanSelfAttention(nn.Module):
 
     def __init__(self,
@@ -124,12 +93,12 @@ class WanSelfAttention(nn.Module):
         self.eps = eps
 
         # layers
-        self.q = nn.Linear(dim, dim)
-        self.k = nn.Linear(dim, dim)
-        self.v = nn.Linear(dim, dim)
-        self.o = nn.Linear(dim, dim)
-        self.norm_q = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
-        self.norm_k = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.q = MojoLinear(weight=nn.Parameter(torch.ones(dim, dim)), bias=nn.Parameter(torch.zeros(dim)))
+        self.k = MojoLinear(weight=nn.Parameter(torch.ones(dim, dim)), bias=nn.Parameter(torch.zeros(dim)))
+        self.v = MojoLinear(weight=nn.Parameter(torch.ones(dim, dim)), bias=nn.Parameter(torch.zeros(dim)))
+        self.o = MojoLinear(weight=nn.Parameter(torch.ones(dim, dim)), bias=nn.Parameter(torch.zeros(dim)))
+        self.norm_q = MojoRMSNorm(dim, eps=eps, weight=nn.Parameter(torch.ones(dim))) if qk_norm else nn.Identity()
+        self.norm_k = MojoRMSNorm(dim, eps=eps, weight=nn.Parameter(torch.ones(dim))) if qk_norm else nn.Identity()
 
     def forward(self, x, seq_lens, grid_sizes, freqs):
         r"""
@@ -208,18 +177,18 @@ class WanAttentionBlock(nn.Module):
         self.eps = eps
 
         # layers
-        self.norm1 = WanLayerNorm(dim, eps)
+        self.norm1 = MojoLayerNorm(dim, eps)
         self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm,
                                           eps)
-        self.norm3 = WanLayerNorm(
-            dim, eps,
-            elementwise_affine=True) if cross_attn_norm else nn.Identity()
+        self.norm3 = (MojoLayerNorm(dim, eps, weight=nn.Parameter(torch.ones(dim)), bias=nn.Parameter(torch.zeros(dim)))
+                      if cross_attn_norm else nn.Identity())
         self.cross_attn = WanCrossAttention(dim, num_heads, (-1, -1), qk_norm,
                                             eps)
-        self.norm2 = WanLayerNorm(dim, eps)
+        self.norm2 = MojoLayerNorm(dim, eps)
         self.ffn = nn.Sequential(
-            nn.Linear(dim, ffn_dim), nn.GELU(approximate='tanh'),
-            nn.Linear(ffn_dim, dim))
+            MojoLinear(weight=nn.Parameter(torch.ones(ffn_dim, dim)), bias=nn.Parameter(torch.zeros(ffn_dim))),
+            MojoGelu(),
+            MojoLinear(weight=nn.Parameter(torch.ones(dim, ffn_dim)), bias=nn.Parameter(torch.zeros(dim))))
 
         # modulation
         self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
@@ -273,8 +242,8 @@ class Head(nn.Module):
 
         # layers
         out_dim = math.prod(patch_size) * out_dim
-        self.norm = WanLayerNorm(dim, eps)
-        self.head = nn.Linear(dim, out_dim)
+        self.norm = MojoLayerNorm(dim, eps)
+        self.head = MojoLinear(weight=nn.Parameter(torch.ones(out_dim, dim)), bias=nn.Parameter(torch.zeros(out_dim)))
 
         # modulation
         self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
@@ -380,12 +349,17 @@ class WanModel(ModelMixin, ConfigMixin):
         self.patch_embedding = nn.Conv3d(
             in_dim, dim, kernel_size=patch_size, stride=patch_size)
         self.text_embedding = nn.Sequential(
-            nn.Linear(text_dim, dim), nn.GELU(approximate='tanh'),
-            nn.Linear(dim, dim))
+            MojoLinear(weight=nn.Parameter(torch.ones(dim, text_dim)), bias=nn.Parameter(torch.zeros(dim))),
+            MojoGelu(),
+            MojoLinear(weight=nn.Parameter(torch.ones(dim, dim)), bias=nn.Parameter(torch.zeros(dim))))
 
         self.time_embedding = nn.Sequential(
-            nn.Linear(freq_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
-        self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
+            MojoLinear(weight=nn.Parameter(torch.ones(dim, freq_dim)), bias=nn.Parameter(torch.zeros(dim))),
+            MojoSilu(),
+            MojoLinear(weight=nn.Parameter(torch.ones(dim, dim)), bias=nn.Parameter(torch.zeros(dim))))
+        self.time_projection = nn.Sequential(
+            MojoSilu(),
+            MojoLinear(weight=nn.Parameter(torch.ones(dim * 6, dim)), bias=nn.Parameter(torch.zeros(dim * 6))))
 
         # blocks
         self.blocks = nn.ModuleList([
