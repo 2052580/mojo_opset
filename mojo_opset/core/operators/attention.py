@@ -285,7 +285,7 @@ class MojoSdpa(MojoOperator):
     def __init__(
         self,
         mask: Optional[torch.Tensor] = None,
-        scale: float = 1.0,
+        scale: Optional[float] = None,
         enable_gqa: bool = False,
     ):
         super().__init__()

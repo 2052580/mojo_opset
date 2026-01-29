@@ -2,22 +2,17 @@
 import math
 
 import torch
-from torch_npu.contrib import transfer_to_npu
 import torch.nn as nn
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 
-from .attention import attention as flash_attention
-
 from mojo_opset import MojoLinear
-from mojo_opset import MojoPagedDecodeGQA
-from mojo_opset import MojoPagedPrefillGQA
+from mojo_opset import MojoSdpa
 from mojo_opset import MojoRMSNorm
 from mojo_opset import MojoLayerNorm
-from mojo_opset import MojoRoPE
 from mojo_opset import MojoGelu
 from mojo_opset import MojoSilu
-from mojo_opset import MojoStorePagedKVCache
+from mojo_opset import MojoGridRoPE
 
 __all__ = ['WanModel']
 
@@ -45,36 +40,6 @@ def rope_params(max_seq_len, dim, theta=10000):
     return freqs
 
 
-def rope_apply(x, grid_sizes, freqs):
-    n, c = x.size(2), x.size(3) // 2
-
-    # split freqs
-    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
-
-    # loop over samples
-    output = []
-    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
-        seq_len = f * h * w
-
-        # precompute multipliers
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float32).reshape(
-            seq_len, n, -1, 2))
-        freqs_i = torch.cat([
-            freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
-            freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-            freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
-        ],
-                            dim=-1).reshape(seq_len, 1, -1)
-
-        # apply rotary embedding
-        x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
-
-        # append to collection
-        output.append(x_i)
-    return torch.stack(output).float()
-
-
 class WanSelfAttention(nn.Module):
 
     def __init__(self,
@@ -99,6 +64,8 @@ class WanSelfAttention(nn.Module):
         self.o = MojoLinear(weight=nn.Parameter(torch.ones(dim, dim)), bias=nn.Parameter(torch.zeros(dim)))
         self.norm_q = MojoRMSNorm(dim, eps=eps, weight=nn.Parameter(torch.ones(dim))) if qk_norm else nn.Identity()
         self.norm_k = MojoRMSNorm(dim, eps=eps, weight=nn.Parameter(torch.ones(dim))) if qk_norm else nn.Identity()
+        self.sdpa = MojoSdpa._registry.get("torch")()
+        self.grid_rope = MojoGridRoPE()
 
     def forward(self, x, seq_lens, grid_sizes, freqs):
         r"""
@@ -119,12 +86,10 @@ class WanSelfAttention(nn.Module):
 
         q, k, v = qkv_fn(x)
 
-        x = flash_attention(
-            q=rope_apply(q, grid_sizes, freqs),
-            k=rope_apply(k, grid_sizes, freqs),
-            v=v,
-            k_lens=seq_lens,
-            window_size=self.window_size)
+        x = self.sdpa(
+            query=self.grid_rope(q, grid_sizes, freqs).transpose(1, 2).to(torch.bfloat16),
+            key=self.grid_rope(k, grid_sizes, freqs).transpose(1, 2).to(torch.bfloat16),
+            value=v.transpose(1, 2).to(torch.bfloat16)).transpose(1, 2).contiguous()
 
         # output
         x = x.flatten(2)
@@ -149,7 +114,10 @@ class WanCrossAttention(WanSelfAttention):
         v = self.v(context).view(b, -1, n, d)
 
         # compute attention
-        x = flash_attention(q, k, v, k_lens=context_lens)
+        x = self.sdpa(
+            query=q.transpose(1, 2),
+            key=k.transpose(1, 2),
+            value=v.transpose(1, 2)).transpose(1, 2).contiguous()
 
         # output
         x = x.flatten(2)
@@ -177,14 +145,14 @@ class WanAttentionBlock(nn.Module):
         self.eps = eps
 
         # layers
-        self.norm1 = MojoLayerNorm(dim, eps)
+        self.norm1 = MojoLayerNorm._registry.get("torch")(dim, eps)
         self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm,
                                           eps)
         self.norm3 = (MojoLayerNorm(dim, eps, weight=nn.Parameter(torch.ones(dim)), bias=nn.Parameter(torch.zeros(dim)))
                       if cross_attn_norm else nn.Identity())
         self.cross_attn = WanCrossAttention(dim, num_heads, (-1, -1), qk_norm,
                                             eps)
-        self.norm2 = MojoLayerNorm(dim, eps)
+        self.norm2 = MojoLayerNorm._registry.get("torch")(dim, eps)
         self.ffn = nn.Sequential(
             MojoLinear(weight=nn.Parameter(torch.ones(ffn_dim, dim)), bias=nn.Parameter(torch.zeros(ffn_dim))),
             MojoGelu(),
@@ -242,7 +210,7 @@ class Head(nn.Module):
 
         # layers
         out_dim = math.prod(patch_size) * out_dim
-        self.norm = MojoLayerNorm(dim, eps)
+        self.norm = MojoLayerNorm._registry.get("torch")(dim, eps)
         self.head = MojoLinear(weight=nn.Parameter(torch.ones(out_dim, dim)), bias=nn.Parameter(torch.zeros(out_dim)))
 
         # modulation
@@ -377,8 +345,7 @@ class WanModel(ModelMixin, ConfigMixin):
             rope_params(1024, d - 4 * (d // 6)),
             rope_params(1024, 2 * (d // 6)),
             rope_params(1024, 2 * (d // 6))
-        ],
-                               dim=1)
+        ], dim=1)
 
         # initialize weights
         self.init_weights()
