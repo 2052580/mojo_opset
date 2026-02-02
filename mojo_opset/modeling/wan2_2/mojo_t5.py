@@ -9,6 +9,8 @@ from .tokenizers import HuggingfaceTokenizer
 from mojo_opset import MojoLinear
 from mojo_opset import MojoGelu
 from mojo_opset import MojoRMSNorm
+from mojo_opset import MojoRelativeEmbedding
+from mojo_opset import MojoT5FullAttention
 
 __all__ = [
     'T5Model',
@@ -23,25 +25,6 @@ def fp16_clamp(x):
         clamp = torch.finfo(x.dtype).max - 1000
         x = torch.clamp(x, min=-clamp, max=clamp)
     return x
-
-
-def init_weights(m):
-    if isinstance(m, T5LayerNorm):
-        nn.init.ones_(m.weight)
-    elif isinstance(m, T5Model):
-        nn.init.normal_(m.token_embedding.weight, std=1.0)
-    elif isinstance(m, T5FeedForward):
-        nn.init.normal_(m.gate[0].weight, std=m.dim**-0.5)
-        nn.init.normal_(m.fc1.weight, std=m.dim**-0.5)
-        nn.init.normal_(m.fc2.weight, std=m.dim_ffn**-0.5)
-    elif isinstance(m, T5Attention):
-        nn.init.normal_(m.q.weight, std=(m.dim * m.dim_attn)**-0.5)
-        nn.init.normal_(m.k.weight, std=m.dim**-0.5)
-        nn.init.normal_(m.v.weight, std=m.dim**-0.5)
-        nn.init.normal_(m.o.weight, std=(m.num_heads * m.dim_attn)**-0.5)
-    elif isinstance(m, T5RelativeEmbedding):
-        nn.init.normal_(
-            m.embedding.weight, std=(2 * m.num_buckets * m.num_heads)**-0.5)
 
 
 class T5LayerNorm(nn.Module):
@@ -76,6 +59,7 @@ class T5Attention(nn.Module):
         self.v = MojoLinear(weight=nn.Parameter(torch.empty(dim_attn, dim)), bias=None)
         self.o = MojoLinear(weight=nn.Parameter(torch.empty(dim, dim_attn)), bias=None)
         self.dropout = nn.Dropout(dropout)
+        self.attn_core = MojoT5FullAttention()
 
     def forward(self, x, context=None, mask=None, pos_bias=None):
         """
@@ -92,20 +76,7 @@ class T5Attention(nn.Module):
         k = self.k(context).view(b, -1, n, c)
         v = self.v(context).view(b, -1, n, c)
 
-        # attention bias
-        attn_bias = x.new_zeros(b, n, q.size(1), k.size(1))
-        if pos_bias is not None:
-            attn_bias += pos_bias
-        if mask is not None:
-            assert mask.ndim in [2, 3]
-            mask = mask.view(b, 1, 1,
-                             -1) if mask.ndim == 2 else mask.unsqueeze(1)
-            attn_bias.masked_fill_(mask == 0, torch.finfo(x.dtype).min)
-
-        # compute attention (T5 does not use scaling)
-        attn = torch.einsum('binc,bjnc->bnij', q, k) + attn_bias
-        attn = F.softmax(attn.float(), dim=-1).type_as(attn)
-        x = torch.einsum('bnij,bjnc->binc', attn, v)
+        x = self.attn_core(q, k, v, mask=mask, pos_bias=pos_bias)
 
         # output
         x = x.reshape(b, -1, n * c)
@@ -161,7 +132,7 @@ class T5SelfAttention(nn.Module):
         self.attn = T5Attention(dim, dim_attn, num_heads, dropout)
         self.norm2 = T5LayerNorm(dim)
         self.ffn = T5FeedForward(dim, dim_ffn, dropout)
-        self.pos_embedding = None if shared_pos else T5RelativeEmbedding(
+        self.pos_embedding = None if shared_pos else MojoRelativeEmbedding(
             num_buckets, num_heads, bidirectional=True)
 
     def forward(self, x, mask=None, pos_bias=None):
@@ -197,7 +168,7 @@ class T5CrossAttention(nn.Module):
         self.cross_attn = T5Attention(dim, dim_attn, num_heads, dropout)
         self.norm3 = MojoRMSNorm(dim, eps=1e-6)
         self.ffn = T5FeedForward(dim, dim_ffn, dropout)
-        self.pos_embedding = None if shared_pos else T5RelativeEmbedding(
+        self.pos_embedding = None if shared_pos else MojoRelativeEmbedding(
             num_buckets, num_heads, bidirectional=False)
 
     def forward(self,
@@ -213,52 +184,6 @@ class T5CrossAttention(nn.Module):
             self.norm2(x), context=encoder_states, mask=encoder_mask))
         x = fp16_clamp(x + self.ffn(self.norm3(x)))
         return x
-
-
-class T5RelativeEmbedding(nn.Module):
-
-    def __init__(self, num_buckets, num_heads, bidirectional, max_dist=128):
-        super(T5RelativeEmbedding, self).__init__()
-        self.num_buckets = num_buckets
-        self.num_heads = num_heads
-        self.bidirectional = bidirectional
-        self.max_dist = max_dist
-
-        # layers
-        self.embedding = nn.Embedding(num_buckets, num_heads)
-
-    def forward(self, lq, lk):
-        device = self.embedding.weight.device
-        # rel_pos = torch.arange(lk).unsqueeze(0).to(device) - \
-        #     torch.arange(lq).unsqueeze(1).to(device)
-        rel_pos = torch.arange(lk, device=device).unsqueeze(0) - \
-            torch.arange(lq, device=device).unsqueeze(1)
-        rel_pos = self._relative_position_bucket(rel_pos)
-        rel_pos_embeds = self.embedding(rel_pos)
-        rel_pos_embeds = rel_pos_embeds.permute(2, 0, 1).unsqueeze(
-            0)  # [1, N, Lq, Lk]
-        return rel_pos_embeds.contiguous()
-
-    def _relative_position_bucket(self, rel_pos):
-        # preprocess
-        if self.bidirectional:
-            num_buckets = self.num_buckets // 2
-            rel_buckets = (rel_pos > 0).long() * num_buckets
-            rel_pos = torch.abs(rel_pos)
-        else:
-            num_buckets = self.num_buckets
-            rel_buckets = 0
-            rel_pos = -torch.min(rel_pos, torch.zeros_like(rel_pos))
-
-        # embeddings for small and large positions
-        max_exact = num_buckets // 2
-        rel_pos_large = max_exact + (torch.log(rel_pos.float() / max_exact) /
-                                     math.log(self.max_dist / max_exact) *
-                                     (num_buckets - max_exact)).long()
-        rel_pos_large = torch.min(
-            rel_pos_large, torch.full_like(rel_pos_large, num_buckets - 1))
-        rel_buckets += torch.where(rel_pos < max_exact, rel_pos, rel_pos_large)
-        return rel_buckets
 
 
 class T5Encoder(nn.Module):
@@ -285,7 +210,7 @@ class T5Encoder(nn.Module):
         # layers
         self.token_embedding = vocab if isinstance(vocab, nn.Embedding) \
             else nn.Embedding(vocab, dim)
-        self.pos_embedding = T5RelativeEmbedding(
+        self.pos_embedding = MojoRelativeEmbedding(
             num_buckets, num_heads, bidirectional=True) if shared_pos else None
         self.dropout = nn.Dropout(dropout)
         self.blocks = nn.ModuleList([
@@ -293,9 +218,6 @@ class T5Encoder(nn.Module):
                             shared_pos, dropout) for _ in range(num_layers)
         ])
         self.norm = T5LayerNorm(dim)
-
-        # initialize weights
-        self.apply(init_weights)
 
     def forward(self, ids, mask=None):
         x = self.token_embedding(ids)
@@ -333,7 +255,7 @@ class T5Decoder(nn.Module):
         # layers
         self.token_embedding = vocab if isinstance(vocab, nn.Embedding) \
             else nn.Embedding(vocab, dim)
-        self.pos_embedding = T5RelativeEmbedding(
+        self.pos_embedding = MojoRelativeEmbedding(
             num_buckets, num_heads, bidirectional=False) if shared_pos else None
         self.dropout = nn.Dropout(dropout)
         self.blocks = nn.ModuleList([
@@ -341,9 +263,6 @@ class T5Decoder(nn.Module):
                              shared_pos, dropout) for _ in range(num_layers)
         ])
         self.norm = T5LayerNorm(dim)
-
-        # initialize weights
-        self.apply(init_weights)
 
     def forward(self, ids, mask=None, encoder_states=None, encoder_mask=None):
         b, s = ids.size()
@@ -398,9 +317,6 @@ class T5Model(nn.Module):
                                  num_heads, decoder_layers, num_buckets,
                                  shared_pos, dropout)
         self.head = MojoLinear(weight=nn.Parameter(torch.empty(vocab_size, dim)), bias=None)
-
-        # initialize weights
-        self.apply(init_weights)
 
     def forward(self, encoder_ids, encoder_mask, decoder_ids, decoder_mask):
         x = self.encoder(encoder_ids, encoder_mask)

@@ -28,6 +28,7 @@ from .operators.attention import MojoPrefillGQA
 from .operators.attention import MojoPrefillMLA
 from .operators.attention import MojoPrefillNSA
 from .operators.attention import MojoSdpa
+from .operators.attention import MojoT5FullAttention
 
 """ kvcache """
 from .operators.kv_cache import MojoStoreMLAKVCache
@@ -46,6 +47,7 @@ from .operators.linear import MojoLinearReduceScatter
 """ embedding """
 from .operators.embedding import MojoEmbedding
 from .operators.embedding import MojoParallelEmbedding
+from .operators.embedding import MojoRelativeEmbedding
 
 """ quantize """
 from .operators.quantize import MojoDequant
@@ -113,6 +115,7 @@ __all__ = [
     "MojoDecodeNSA",
     "MojoPagedDecodeNSA",
     "MojoSdpa",
+    "MojoT5FullAttention",
 
     "MojoStorePagedKVCache",
     "MojoStoreMLAKVCache",
@@ -131,6 +134,7 @@ __all__ = [
 
     "MojoEmbedding",
     "MojoParallelEmbedding",
+    "MojoRelativeEmbedding",
 
     "MojoMoEGating",
     "MojoMoEDispatch",

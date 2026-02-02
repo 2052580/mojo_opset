@@ -5,6 +5,7 @@ from typing import Optional
 from typing import Tuple
 
 import torch
+import torch_npu
 
 from ..operator import MojoOperator
 
@@ -257,6 +258,58 @@ class MojoPagedDecodeMLA(MojoOperator):
     pass
 
 
+class MojoT5FullAttention(MojoOperator):
+    def __init__(self):
+        """
+        Initialize T5-style full attention operator.
+
+        Args:
+            softmax_dtype (Optional[torch.dtype], default=torch.float32):
+                Dtype used for softmax computation. If None, softmax runs in float32
+                then casts back to input dtype, matching typical T5 behavior.
+        """
+        super().__init__()
+
+    def forward(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        pos_bias: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Apply full attention as used by T5 (no scaling), with optional mask and positional bias.
+
+        Args:
+            q (torch.Tensor): Query tensor of shape [B, Lq, N, C].
+            k (torch.Tensor): Key tensor of shape [B, Lk, N, C].
+            v (torch.Tensor): Value tensor of shape [B, Lk, N, C].
+            mask (Optional[torch.Tensor]): Attention mask; either [B, Lk] or [B, Lq, Lk].
+            pos_bias (Optional[torch.Tensor]): Positional bias of shape [B, N, Lq, Lk].
+
+        Returns:
+            torch.Tensor: Output tensor of shape [B, Lq, N, C].
+        """
+        b = q.size(0)
+        n = q.size(2)
+        lq = q.size(1)
+        lk = k.size(1)
+        attn_bias = q.new_zeros(b, n, lq, lk)
+        if pos_bias is not None:
+            attn_bias = attn_bias + pos_bias
+        if mask is not None:
+            if mask.ndim == 2:
+                mask = mask.view(b, 1, 1, -1)
+            else:
+                mask = mask.unsqueeze(1)
+            attn_bias.masked_fill_(mask == 0, torch.finfo(q.dtype).min)
+        attn = torch.einsum("binc,bjnc->bnij", q, k) + attn_bias
+        attn = torch.softmax(attn.float(), dim=-1).type_as(attn)
+        out = torch.einsum("bnij,bjnc->binc", attn, v)
+        return out
+
+
 class MojoDecodeNSA(MojoOperator):
     pass
 
@@ -325,4 +378,14 @@ class MojoSdpa(MojoOperator):
             scale=self.scale,
             enable_gqa=self.enable_gqa,
         )
+
+        # output = torch_npu.npu_fusion_attention(
+        #     query=query,
+        #     key=key,
+        #     value=value,
+        #     atten_mask=self.mask,
+        #     input_layout="BNSD",
+        #     head_num=query.shape[1],
+        # )[0]
+
         return output
