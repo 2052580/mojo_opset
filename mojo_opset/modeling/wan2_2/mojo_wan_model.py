@@ -20,7 +20,7 @@ def sinusoidal_embedding_1d(dim, position):
     # preprocess
     assert dim % 2 == 0
     half = dim // 2
-    position = position.type(torch.float64)
+    position = position.type(torch.float32)
 
     # calculation
     sinusoid = torch.outer(
@@ -87,9 +87,9 @@ class WanSelfAttention(nn.Module):
         q, k, v = qkv_fn(x)
 
         x = self.sdpa(
-            query=self.grid_rope(q, grid_sizes, freqs).transpose(1, 2).to(torch.bfloat16),
-            key=self.grid_rope(k, grid_sizes, freqs).transpose(1, 2).to(torch.bfloat16),
-            value=v.transpose(1, 2).to(torch.bfloat16)).transpose(1, 2).contiguous()
+            query=self.grid_rope(q, grid_sizes, freqs).transpose(1, 2),
+            key=self.grid_rope(k, grid_sizes, freqs).transpose(1, 2),
+            value=v.transpose(1, 2)).transpose(1, 2).contiguous()
 
         # output
         x = x.flatten(2)
@@ -347,6 +347,8 @@ class WanModel(ModelMixin, ConfigMixin):
             rope_params(1024, 2 * (d // 6))
         ], dim=1)
 
+        self.freqs_list = None
+
     def forward(
         self,
         x,
@@ -419,12 +421,15 @@ class WanModel(ModelMixin, ConfigMixin):
                 for u in context
             ]))
 
+        # calculate freqs
+        self.calculate_freqs(grid_sizes, seq_len)
+
         # arguments
         kwargs = dict(
             e=e0,
             seq_lens=seq_lens,
             grid_sizes=grid_sizes,
-            freqs=self.freqs,
+            freqs=self.freqs_list,
             context=context,
             context_lens=context_lens)
 
@@ -437,6 +442,40 @@ class WanModel(ModelMixin, ConfigMixin):
         # unpatchify
         x = self.unpatchify(x, grid_sizes)
         return [u.float() for u in x]
+
+    def calculate_freqs(self, grid_sizes, seq_len):
+        r"""
+        Prepare per-sample 3D RoPE frequency tensors and cache them.
+
+        Args:
+            grid_sizes (Tensor):
+                Spatial-temporal grid dimensions for each sample in batch,
+                    shape [B, 3] (3 dimensions correspond to F_patches, H_patches, W_patches)
+            seq_len (int):
+                Effective sequence length per sample, equals F_patches * H_patches * W_patches.
+
+        Behavior:
+            - Splits the per-head complex frequency table into three channel partitions.
+            - For each sample (F, H, W), broadcasts and concatenates the three partitions
+              over the 3D grid, then flattens to shape [seq_len, 1, C_pairs].
+            - Caches the result list in self.freqs_list; no return value.
+        """
+
+        if self.freqs_list is None:
+            c = (self.dim // self.num_heads) // 2
+            freqs = self.freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+            freqs_list = []
+
+            for i, (f, h, w) in enumerate(grid_sizes.tolist()):
+
+                freqs_i = torch.cat([
+                    freqs[0][:f].view(f, 1, 1, -1).expand(f, h, w, -1),
+                    freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
+                    freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1)
+                ],
+                                    dim=-1).reshape(seq_len, 1, -1)
+                freqs_list.append(freqs_i)
+            self.freqs_list = freqs_list
 
     def unpatchify(self, x, grid_sizes):
         r"""

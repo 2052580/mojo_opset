@@ -379,25 +379,25 @@ class MojoSdpa(MojoOperator):
         #     enable_gqa=self.enable_gqa,
         # )
 
-        # output = torch_npu.npu_fusion_attention(
-        #     query=query,
-        #     key=key,
-        #     value=value,
-        #     scale=(1.0 / math.sqrt(query.shape[-1])),
-        #     head_num=query.shape[1],
-        #     input_layout="BNSD",
-        #     sparse_mode=0
-        # )[0]
-
-        output = torch_npu.npu_fused_infer_attention_score(
+        output = torch_npu.npu_fusion_attention(
             query=query,
             key=key,
             value=value,
             scale=query.shape[-1] ** -0.5,
-            num_heads=query.shape[1],
+            head_num=query.shape[1],
             input_layout="BNSD",
-            pre_tokens=2147483647, 
-            next_tokens=2147483647
+            sparse_mode=0
         )[0]
+
+        # output = torch_npu.npu_fused_infer_attention_score(
+        #     query=query,
+        #     key=key,
+        #     value=value,
+        #     scale=query.shape[-1] ** -0.5,
+        #     num_heads=query.shape[1],
+        #     input_layout="BNSD",
+        #     pre_tokens=2147483647, 
+        #     next_tokens=2147483647
+        # )[0]
 
         return output
