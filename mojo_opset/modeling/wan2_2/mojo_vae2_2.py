@@ -6,6 +6,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+from mojo_opset import MojoChannelRMSNorm
+from mojo_opset import MojoUpsample
+from mojo_opset import MojoSilu
+
 __all__ = [
     "Wan2_2_VAE",
 ]
@@ -84,14 +88,13 @@ class Resample(nn.Module):
         # layers
         if mode == "upsample2d":
             self.resample = nn.Sequential(
-                Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
+                MojoUpsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
                 nn.Conv2d(dim, dim, 3, padding=1),
             )
         elif mode == "upsample3d":
             self.resample = nn.Sequential(
-                Upsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
+                MojoUpsample(scale_factor=(2.0, 2.0), mode="nearest-exact"),
                 nn.Conv2d(dim, dim, 3, padding=1),
-                # nn.Conv2d(dim, dim//2, 3, padding=1)
             )
             self.time_conv = CausalConv3d(
                 dim, dim * 2, (3, 1, 1), padding=(1, 0, 0))
@@ -198,11 +201,11 @@ class ResidualBlock(nn.Module):
 
         # layers
         self.residual = nn.Sequential(
-            RMS_norm(in_dim, images=False),
-            nn.SiLU(),
+            MojoChannelRMSNorm(in_dim, images=False),
+            MojoSilu(),
             CausalConv3d(in_dim, out_dim, 3, padding=1),
-            RMS_norm(out_dim, images=False),
-            nn.SiLU(),
+            MojoChannelRMSNorm(out_dim, images=False),
+            MojoSilu(),
             nn.Dropout(dropout),
             CausalConv3d(out_dim, out_dim, 3, padding=1),
         )
@@ -244,7 +247,7 @@ class AttentionBlock(nn.Module):
         self.dim = dim
 
         # layers
-        self.norm = RMS_norm(dim)
+        self.norm = MojoChannelRMSNorm(dim)
         self.to_qkv = nn.Conv2d(dim, dim * 3, 1)
         self.proj = nn.Conv2d(dim, dim, 1)
 
@@ -550,8 +553,8 @@ class Encoder3d(nn.Module):
 
         # # output blocks
         self.head = nn.Sequential(
-            RMS_norm(out_dim, images=False),
-            nn.SiLU(),
+            MojoChannelRMSNorm(out_dim, images=False),
+            MojoSilu(),
             CausalConv3d(out_dim, z_dim, 3, padding=1),
         )
 
@@ -663,8 +666,8 @@ class Decoder3d(nn.Module):
 
         # output blocks
         self.head = nn.Sequential(
-            RMS_norm(out_dim, images=False),
-            nn.SiLU(),
+            MojoChannelRMSNorm(out_dim, images=False),
+            MojoSilu(),
             CausalConv3d(out_dim, 12, 3, padding=1),
         )
 

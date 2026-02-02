@@ -29,13 +29,14 @@ def sinusoidal_embedding_1d(dim, position):
     return x
 
 
+@torch.amp.autocast('npu', enabled=False)
 def rope_params(max_seq_len, dim, theta=10000):
     assert dim % 2 == 0
-    angles = torch.arange(0, dim, 2, dtype=torch.float32) / float(dim)
-    base = torch.tensor(theta, dtype=torch.float32)
-    inv_freq = 1.0 / torch.pow(base, angles)
-    freqs = torch.outer(torch.arange(max_seq_len, dtype=torch.float32), inv_freq)
-    freqs = torch.polar(torch.ones_like(freqs, dtype=torch.float32), freqs)
+    freqs = torch.outer(
+        torch.arange(max_seq_len),
+        1.0 / torch.pow(theta,
+                        torch.arange(0, dim, 2).to(torch.float64).div(dim)))
+    freqs = torch.polar(torch.ones_like(freqs), freqs).to(torch.complex64)
     return freqs
 
 
@@ -178,19 +179,19 @@ class WanAttentionBlock(nn.Module):
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
-        e = (self.modulation.unsqueeze(0) + e).float().chunk(6, dim=2)
+        e = (self.modulation.unsqueeze(0) + e).chunk(6, dim=2)
 
         # self-attention
         y = self.self_attn(
-            self.norm1(x).float() * (1 + e[1].squeeze(2)) + e[0].squeeze(2),
+            self.norm1(x) * (1 + e[1].squeeze(2)) + e[0].squeeze(2),
             seq_lens, grid_sizes, freqs)
-        x = x + y.float() * e[2].squeeze(2)
+        x = x + y * e[2].squeeze(2)
 
         # cross-attention & ffn function
         def cross_attn_ffn(x, context, context_lens, e):
             x = x + self.cross_attn(self.norm3(x), context, context_lens)
-            y = self.ffn(self.norm2(x).float() * (1 + e[4].squeeze(2)) +
-                         e[3].squeeze(2)).float()
+            y = self.ffn(self.norm2(x) * (1 + e[4].squeeze(2)) +
+                         e[3].squeeze(2))
             x = x + y * e[5].squeeze(2)
             return x
 
@@ -221,10 +222,10 @@ class Head(nn.Module):
             x(Tensor): Shape [B, L1, C]
             e(Tensor): Shape [B, L1, C]
         """
-        assert e.dtype == torch.float32
-        e = (self.modulation.unsqueeze(0) + e.unsqueeze(2)).float().chunk(
+        # assert e.dtype == torch.float32
+        e = (self.modulation.unsqueeze(0) + e.unsqueeze(2)).chunk(
             2, dim=2)
-        x = (self.head(self.norm(x).float() * (1 + e[1].squeeze(2)) +
+        x = (self.head(self.norm(x) * (1 + e[1].squeeze(2)) +
                        e[0].squeeze(2)))
         return x
 
@@ -346,9 +347,6 @@ class WanModel(ModelMixin, ConfigMixin):
             rope_params(1024, 2 * (d // 6))
         ], dim=1)
 
-        # initialize weights
-        self.init_weights()
-
     def forward(
         self,
         x,
@@ -409,8 +407,8 @@ class WanModel(ModelMixin, ConfigMixin):
         t = t.flatten()
         e = self.time_embedding(
             sinusoidal_embedding_1d(self.freq_dim,
-                                    t).unflatten(0, (bt, seq_len)).float()).float()
-        e0 = self.time_projection(e).unflatten(2, (6, self.dim)).float()
+                                    t).unflatten(0, (bt, seq_len)).float())
+        e0 = self.time_projection(e).unflatten(2, (6, self.dim))
 
         # context
         context_lens = None
@@ -464,27 +462,3 @@ class WanModel(ModelMixin, ConfigMixin):
             u = u.reshape(c, *[i * j for i, j in zip(v, self.patch_size)])
             out.append(u)
         return out
-
-    def init_weights(self):
-        r"""
-        Initialize model parameters using Xavier initialization.
-        """
-
-        # basic init
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-        # init embeddings
-        nn.init.xavier_uniform_(self.patch_embedding.weight.flatten(1))
-        for m in self.text_embedding.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=.02)
-        for m in self.time_embedding.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=.02)
-
-        # init output layer
-        nn.init.zeros_(self.head.head.weight)

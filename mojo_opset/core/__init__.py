@@ -48,6 +48,7 @@ from .operators.linear import MojoLinearReduceScatter
 from .operators.embedding import MojoEmbedding
 from .operators.embedding import MojoParallelEmbedding
 from .operators.embedding import MojoRelativeEmbedding
+from .operators.embedding import MojoUpsample
 
 """ quantize """
 from .operators.quantize import MojoDequant
@@ -66,6 +67,7 @@ from .operators.normalization import MojoResidualAddNormCast
 from .operators.normalization import MojoResidualAddNormQuant
 from .operators.normalization import MojoResidualAddRMSNorm
 from .operators.normalization import MojoRMSNorm
+from .operators.normalization import MojoChannelRMSNorm
 
 """ position_embedding """
 from .operators.position_embedding import MojoNormRoPE
@@ -135,6 +137,7 @@ __all__ = [
     "MojoEmbedding",
     "MojoParallelEmbedding",
     "MojoRelativeEmbedding",
+    "MojoUpsample",
 
     "MojoMoEGating",
     "MojoMoEDispatch",
@@ -142,6 +145,7 @@ __all__ = [
 
     "MojoLayerNorm",
     "MojoRMSNorm",
+    "MojoChannelRMSNorm",
     "MojoResidualAddRMSNorm",
     "MojoResidualAddLayerNorm",
     "MojoNormQuant",
