@@ -2,7 +2,6 @@ import logging
 import math
 
 import torch
-from torch_npu.contrib import transfer_to_npu
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -192,11 +191,11 @@ class T5CrossAttention(nn.Module):
         self.shared_pos = shared_pos
 
         # layers
-        self.norm1 = T5LayerNorm(dim)
+        self.norm1 = MojoRMSNorm(dim, eps=1e-6)
         self.self_attn = T5Attention(dim, dim_attn, num_heads, dropout)
-        self.norm2 = T5LayerNorm(dim)
+        self.norm2 = MojoRMSNorm(dim, eps=1e-6)
         self.cross_attn = T5Attention(dim, dim_attn, num_heads, dropout)
-        self.norm3 = T5LayerNorm(dim)
+        self.norm3 = MojoRMSNorm(dim, eps=1e-6)
         self.ffn = T5FeedForward(dim, dim_ffn, dropout)
         self.pos_embedding = None if shared_pos else T5RelativeEmbedding(
             num_buckets, num_heads, bidirectional=False)
@@ -467,7 +466,7 @@ class T5EncoderModel:
         self,
         text_len,
         dtype=torch.bfloat16,
-        device=torch.cuda.current_device(),
+        device=torch.npu.current_device(),
         checkpoint_path=None,
         tokenizer_path=None,
         shard_fn=None,

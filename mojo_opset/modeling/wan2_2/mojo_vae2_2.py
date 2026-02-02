@@ -1,8 +1,6 @@
-# Copyright 2024-2025 The Alibaba Wan Team Authors. All rights reserved.
 import logging
 
 import torch
-from torch_npu.contrib import transfer_to_npu
 import torch.cuda.amp as amp
 import torch.nn as nn
 import torch.nn.functional as F
@@ -896,7 +894,7 @@ class Wan2_2_VAE:
         dim_mult=[1, 2, 4, 4],
         temperal_downsample=[False, True, True],
         dtype=torch.float,
-        device="cuda",
+        device="npu",
     ):
 
         self.dtype = dtype
