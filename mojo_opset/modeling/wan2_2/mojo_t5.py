@@ -7,6 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .tokenizers import HuggingfaceTokenizer
+from mojo_opset import MojoLinear
+from mojo_opset import MojoGelu
+from mojo_opset import MojoRMSNorm
 
 __all__ = [
     'T5Model',
@@ -42,13 +45,6 @@ def init_weights(m):
             m.embedding.weight, std=(2 * m.num_buckets * m.num_heads)**-0.5)
 
 
-class GELU(nn.Module):
-
-    def forward(self, x):
-        return 0.5 * x * (1.0 + torch.tanh(
-            math.sqrt(2.0 / math.pi) * (x + 0.044715 * torch.pow(x, 3.0))))
-
-
 class T5LayerNorm(nn.Module):
 
     def __init__(self, dim, eps=1e-6):
@@ -76,10 +72,10 @@ class T5Attention(nn.Module):
         self.head_dim = dim_attn // num_heads
 
         # layers
-        self.q = nn.Linear(dim, dim_attn, bias=False)
-        self.k = nn.Linear(dim, dim_attn, bias=False)
-        self.v = nn.Linear(dim, dim_attn, bias=False)
-        self.o = nn.Linear(dim_attn, dim, bias=False)
+        self.q = MojoLinear(weight=nn.Parameter(torch.empty(dim_attn, dim)), bias=None)
+        self.k = MojoLinear(weight=nn.Parameter(torch.empty(dim_attn, dim)), bias=None)
+        self.v = MojoLinear(weight=nn.Parameter(torch.empty(dim_attn, dim)), bias=None)
+        self.o = MojoLinear(weight=nn.Parameter(torch.empty(dim, dim_attn)), bias=None)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, context=None, mask=None, pos_bias=None):
@@ -127,9 +123,12 @@ class T5FeedForward(nn.Module):
         self.dim_ffn = dim_ffn
 
         # layers
-        self.gate = nn.Sequential(nn.Linear(dim, dim_ffn, bias=False), GELU())
-        self.fc1 = nn.Linear(dim, dim_ffn, bias=False)
-        self.fc2 = nn.Linear(dim_ffn, dim, bias=False)
+        self.gate = nn.Sequential(
+            MojoLinear(weight=nn.Parameter(torch.empty(dim_ffn, dim)), bias=None),
+            MojoGelu._registry.get("torch")(),
+        )
+        self.fc1 = MojoLinear(weight=nn.Parameter(torch.empty(dim_ffn, dim)), bias=None)
+        self.fc2 = MojoLinear(weight=nn.Parameter(torch.empty(dim, dim_ffn)), bias=None)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -399,7 +398,7 @@ class T5Model(nn.Module):
         self.decoder = T5Decoder(self.token_embedding, dim, dim_attn, dim_ffn,
                                  num_heads, decoder_layers, num_buckets,
                                  shared_pos, dropout)
-        self.head = nn.Linear(dim, vocab_size, bias=False)
+        self.head = MojoLinear(weight=nn.Parameter(torch.empty(vocab_size, dim)), bias=None)
 
         # initialize weights
         self.apply(init_weights)
@@ -443,13 +442,7 @@ def _t5(name,
     # set device
     model = model.to(dtype=dtype, device=device)
 
-    # init tokenizer
-    if return_tokenizer:
-        from .tokenizers import HuggingfaceTokenizer
-        tokenizer = HuggingfaceTokenizer(f'google/{name}', **tokenizer_kwargs)
-        return model, tokenizer
-    else:
-        return model
+    return model
 
 
 def umt5_xxl(**kwargs):
