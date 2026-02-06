@@ -217,6 +217,7 @@ def load_weights_with_renaming_and_converter(
 ):
     # TODO(liuyuan): Once we model with transformers.modeling_utils.PreTrainedModel and transformers.configuration_utils.PretrainedConfig, we should use convert_and_load_state_dict_in_model directly.
     # TODO(liuyuan): If partial weight-loading is required, perharps we could use the index json (aka. transformers.utils.SAFE_WEIGHTS_INDEX_NAME) to do the key renaming ahead of time.
+    import transformers
     from transformers.core_model_loading import WeightConverter, WeightRenaming, rename_source_key
     from copy import deepcopy
 
@@ -254,7 +255,12 @@ def load_weights_with_renaming_and_converter(
 
     new_state_dict = {}
     for k, mapping in param_name_to_load.items():
-        converted_tensor,_ = mapping.convert(k)
+
+        if transformers.__version__ >= '5.1.0':
+            converted_tensor = mapping.convert(k)
+        else:
+            converted_tensor, _ = mapping.convert(k)
+
         for k,v in converted_tensor.items():
             if isinstance(v, list):
                 converted_tensor[k] = v[0]
