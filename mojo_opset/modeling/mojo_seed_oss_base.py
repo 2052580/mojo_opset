@@ -1,5 +1,3 @@
-
-
 from typing import Callable, Optional, Union
 
 import torch
@@ -15,7 +13,7 @@ from mojo_opset import MojoPagedPrefillGQA
 from mojo_opset import MojoPagedDecodeGQA
 
 
-class SeedOssConfig():
+class SeedOssConfig:
     def __init__(self):
         self.vocab_size = 155136
         self.max_position_embeddings = 8192
@@ -35,10 +33,8 @@ class SeedOssConfig():
         self.residual_dropout = 0.1
         self.mlp_bias = False
         self.head_dim = 128
-        self.rope_scaling = {
-            "rope_type": "default"
-        }
-        self.rope_theta = 10000000.0,
+        self.rope_scaling = {"rope_type": "default"}
+        self.rope_theta = (10000000.0,)
 
         self.tie_word_embeddings = False
         self.pad_token_id = 1
@@ -356,7 +352,9 @@ class SeedOssModel(nn.Module):
 
         if use_cache and past_key_values is None:
             bsz = inputs_embeds.shape[0]
-            past_key_values = PagedDummyCache(self.config, batch_size=bsz, device=str(inputs_embeds.device), block_size=16)
+            past_key_values = PagedDummyCache(
+                self.config, batch_size=bsz, device=str(inputs_embeds.device), block_size=16
+            )
 
         if cache_position is None:
             if past_key_values is not None:
