@@ -44,21 +44,6 @@ class CausalConv3d(nn.Conv3d):
         return super().forward(x)
 
 
-class RMS_norm(nn.Module):
-    def __init__(self, dim, channel_first=True, images=True, bias=False):
-        super().__init__()
-        broadcastable_dims = (1, 1, 1) if not images else (1, 1)
-        shape = (dim, *broadcastable_dims) if channel_first else (dim,)
-
-        self.channel_first = channel_first
-        self.scale = dim**0.5
-        self.gamma = nn.Parameter(torch.ones(shape))
-        self.bias = nn.Parameter(torch.zeros(shape)) if bias else 0.0
-
-    def forward(self, x):
-        return F.normalize(x, dim=(1 if self.channel_first else -1)) * self.scale * self.gamma + self.bias
-
-
 class Upsample(nn.Upsample):
     def forward(self, x):
         """
@@ -827,7 +812,14 @@ def _video_vae(pretrained_path=None, z_dim=16, dim=160, device="cpu", **kwargs):
 
     # load checkpoint
     logging.info(f"loading {pretrained_path}")
-    model.load_state_dict(torch.load(pretrained_path, map_location=device), assign=True)
+    _sd = torch.load(pretrained_path, map_location=device)
+    _expected = set(model.state_dict().keys())
+    for _k in list(_sd.keys()):
+        if _k.endswith(".gamma"):
+            _wk = _k[:-6] + ".weight"
+            if _wk in _expected and _wk not in _sd:
+                _sd[_wk] = _sd.pop(_k)
+    model.load_state_dict(_sd, assign=True)
 
     return model
 
@@ -841,7 +833,7 @@ class Wan2_2_VAE:
         dim_mult=[1, 2, 4, 4],
         temperal_downsample=[False, True, True],
         dtype=torch.float,
-        device="npu",
+        device="cpu",
     ):
 
         self.dtype = dtype
